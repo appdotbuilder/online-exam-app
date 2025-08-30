@@ -1,48 +1,181 @@
+import { db } from '../db';
+import { questionsTable, examsTable, answersTable } from '../db/schema';
 import { type CreateQuestionInput, type UpdateQuestionInput, type Question, type GetQuestionsByExamInput } from '../schema';
+import { eq, SQL, and } from 'drizzle-orm';
 
 export async function createQuestion(input: CreateQuestionInput): Promise<Question> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to create a new question for a specific exam.
-    // Should validate that exam exists and pilihan array has exactly 4 items.
-    return {
-        id: 0,
+  try {
+    // First, validate that the exam exists
+    const examExists = await db.select()
+      .from(examsTable)
+      .where(eq(examsTable.id, input.exam_id))
+      .execute();
+
+    if (examExists.length === 0) {
+      throw new Error(`Exam with ID ${input.exam_id} does not exist`);
+    }
+
+    // Insert the question
+    const result = await db.insert(questionsTable)
+      .values({
         exam_id: input.exam_id,
         soal: input.soal,
         pilihan: input.pilihan,
-        jawaban_benar: input.jawaban_benar,
-        created_at: new Date()
-    } as Question;
+        jawaban_benar: input.jawaban_benar
+      })
+      .returning()
+      .execute();
+
+    const question = result[0];
+    return {
+      ...question,
+      pilihan: question.pilihan as string[] // Cast JSON back to string array
+    };
+  } catch (error) {
+    console.error('Question creation failed:', error);
+    throw error;
+  }
 }
 
 export async function getQuestionsByExamId(input: GetQuestionsByExamInput): Promise<Question[]> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to fetch all questions for a specific exam.
-    // For participants, should exclude jawaban_benar field for security.
-    return [];
+  try {
+    const results = await db.select()
+      .from(questionsTable)
+      .where(eq(questionsTable.exam_id, input.examId))
+      .execute();
+
+    return results.map(question => ({
+      ...question,
+      pilihan: question.pilihan as string[] // Cast JSON back to string array
+    }));
+  } catch (error) {
+    console.error('Failed to get questions by exam ID:', error);
+    throw error;
+  }
 }
 
 export async function getQuestionById(id: number): Promise<Question | null> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to fetch a specific question by ID.
-    return null;
+  try {
+    const results = await db.select()
+      .from(questionsTable)
+      .where(eq(questionsTable.id, id))
+      .execute();
+
+    if (results.length === 0) {
+      return null;
+    }
+
+    const question = results[0];
+    return {
+      ...question,
+      pilihan: question.pilihan as string[] // Cast JSON back to string array
+    };
+  } catch (error) {
+    console.error('Failed to get question by ID:', error);
+    throw error;
+  }
 }
 
 export async function updateQuestion(input: UpdateQuestionInput): Promise<Question> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to update question information in the database.
-    // Should validate that pilihan array has exactly 4 items if provided.
-    return {} as Question;
+  try {
+    // First check if question exists
+    const existingQuestion = await getQuestionById(input.id);
+    if (!existingQuestion) {
+      throw new Error(`Question with ID ${input.id} does not exist`);
+    }
+
+    // Build update object with only provided fields
+    const updateData: any = {};
+    if (input.soal !== undefined) updateData.soal = input.soal;
+    if (input.pilihan !== undefined) updateData.pilihan = input.pilihan;
+    if (input.jawaban_benar !== undefined) updateData.jawaban_benar = input.jawaban_benar;
+
+    const result = await db.update(questionsTable)
+      .set(updateData)
+      .where(eq(questionsTable.id, input.id))
+      .returning()
+      .execute();
+
+    const question = result[0];
+    return {
+      ...question,
+      pilihan: question.pilihan as string[] // Cast JSON back to string array
+    };
+  } catch (error) {
+    console.error('Question update failed:', error);
+    throw error;
+  }
 }
 
 export async function deleteQuestion(id: number): Promise<void> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to delete a question from the database.
-    // Should also clean up related answer data.
+  try {
+    // First check if question exists
+    const existingQuestion = await getQuestionById(id);
+    if (!existingQuestion) {
+      throw new Error(`Question with ID ${id} does not exist`);
+    }
+
+    // Clean up related answer data that references this question
+    // This involves updating the JSON fields in answers table
+    const answers = await db.select()
+      .from(answersTable)
+      .where(eq(answersTable.exam_id, existingQuestion.exam_id))
+      .execute();
+
+    // Update each answer to remove references to this question
+    for (const answer of answers) {
+      const jawaban = answer.jawaban as Record<string, string>;
+      const progressJawaban = answer.progress_jawaban as Record<string, string> | null;
+
+      // Remove the question from jawaban object
+      if (jawaban && jawaban[id.toString()]) {
+        delete jawaban[id.toString()];
+      }
+
+      // Remove the question from progress_jawaban object
+      if (progressJawaban && progressJawaban[id.toString()]) {
+        delete progressJawaban[id.toString()];
+      }
+
+      // Update the answer record
+      await db.update(answersTable)
+        .set({
+          jawaban: jawaban,
+          progress_jawaban: progressJawaban
+        })
+        .where(eq(answersTable.id, answer.id))
+        .execute();
+    }
+
+    // Finally delete the question
+    await db.delete(questionsTable)
+      .where(eq(questionsTable.id, id))
+      .execute();
+  } catch (error) {
+    console.error('Question deletion failed:', error);
+    throw error;
+  }
 }
 
 export async function getQuestionsForParticipant(examId: number): Promise<Omit<Question, 'jawaban_benar'>[]> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to get questions for participants without correct answers.
-    // Should exclude jawaban_benar field to prevent cheating.
-    return [];
+  try {
+    const results = await db.select({
+      id: questionsTable.id,
+      exam_id: questionsTable.exam_id,
+      soal: questionsTable.soal,
+      pilihan: questionsTable.pilihan,
+      created_at: questionsTable.created_at
+    })
+      .from(questionsTable)
+      .where(eq(questionsTable.exam_id, examId))
+      .execute();
+
+    return results.map(question => ({
+      ...question,
+      pilihan: question.pilihan as string[] // Cast JSON back to string array
+    }));
+  } catch (error) {
+    console.error('Failed to get questions for participant:', error);
+    throw error;
+  }
 }
